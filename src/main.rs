@@ -69,6 +69,8 @@ fn parse_args() -> Result<Cli, String> {
     let mut sender = None;
     let mut receiver = None;
     let mut output_path = None;
+    let mut sender_timing = None;
+    let mut receiver_timing = None;
     let mut options = AnalysisOptions::default();
     let mut pretty = false;
     let mut verbose = false;
@@ -84,6 +86,8 @@ fn parse_args() -> Result<Cli, String> {
                 receiver = Some(path_value(&mut parser, "--receiver")?)
             }
             Short('o') | Long("output") => output_path = Some(path_value(&mut parser, "--output")?),
+            Long("sender-timing") => sender_timing = Some(path_value(&mut parser, "--sender-timing")?),
+            Long("receiver-timing") => receiver_timing = Some(path_value(&mut parser, "--receiver-timing")?),
             Short('n') | Long("count") => {
                 let count = number_value(&mut parser, "--count")?;
                 if count == 0 {
@@ -96,6 +100,9 @@ fn parse_args() -> Result<Cli, String> {
             }
             Long("max-latency") => {
                 options.max_latency_ms = float_value(&mut parser, "--max-latency")?;
+            }
+            Long("max-clock-error") => {
+                options.max_clock_error_ms = float_value(&mut parser, "--max-clock-error")?;
             }
             Long("pretty") => pretty = true,
             Long("verbose") => verbose = true,
@@ -118,9 +125,13 @@ fn parse_args() -> Result<Cli, String> {
         || options.min_gap_ms <= 0.0
         || !options.max_latency_ms.is_finite()
         || options.max_latency_ms <= 0.0
+        || !options.max_clock_error_ms.is_finite()
+        || options.max_clock_error_ms <= 0.0
     {
         return Err("--min-gap 和 --max-latency 必须是大于 0 的有限数字".to_string());
     }
+    options.sender_timing_path = sender_timing;
+    options.receiver_timing_path = receiver_timing;
     Ok(Cli {
         sender,
         receiver,
@@ -159,6 +170,9 @@ fn float_value(parser: &mut lexopt::Parser, name: &str) -> Result<f64, String> {
 }
 
 fn print_usage() {
+    println!("  --sender-timing <PATH>   sender timing sidecar (default: <wav>.timing.json)");
+    println!("  --receiver-timing <PATH> receiver timing sidecar (default: <wav>.timing.json)");
+    println!("  --max-clock-error <MS>   maximum relative clock error, default 10");
     println!("用法: audio-checker.exe --sender <PATH> --receiver <PATH> [选项]");
     println!("  --sender <PATH>       发送方 WAV，必填");
     println!("  --receiver <PATH>     接收方 WAV，必填");
