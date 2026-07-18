@@ -3,12 +3,12 @@
 use crate::detector::Event;
 
 const FRAME: usize = 16;
-const TEMPLATE_MS: usize = 260;
-const SEARCH_MS: usize = 45;
+const TEMPLATE_MS: usize = 160;
+const SEARCH_MS: usize = 12;
 const MIN_CORRELATION: f64 = 0.45;
 const MIN_PEAK_MARGIN: f64 = 0.02;
 const PEAK_EXCLUSION_MS: usize = SEARCH_MS;
-const CANDIDATE_PRIOR_WEIGHT: f64 = 0.02;
+const CANDIDATE_PRIOR_WEIGHT: f64 = 0.10;
 
 pub fn refine_events(
     sender_samples: &[f32],
@@ -218,5 +218,21 @@ mod tests {
             }],
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn 精定位不会偏离粗起音太远() {
+        let mut sender = vec![0.0f32; 12_000];
+        let mut receiver = vec![0.0f32; 12_000];
+        for index in 0..3_200 {
+            let envelope = (-(index as f32) / 900.0).exp();
+            let value = envelope
+                * (2.0 * std::f32::consts::PI * 420.0 * index as f32 / 16_000.0).sin();
+            sender[1_000 + index] = value;
+            receiver[5_000 + index] = value * 0.7;
+        }
+
+        let result = correlate_near_candidate(&sender, &receiver, 1_000, 5_000).unwrap();
+        assert!(result.abs_diff(5_000) <= SEARCH_MS * FRAME);
     }
 }
