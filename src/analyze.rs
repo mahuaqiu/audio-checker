@@ -54,11 +54,13 @@ pub struct AnalysisReport {
 
 #[derive(Debug, Serialize)]
 pub struct ClockQuality {
-    pub sender_server: Option<String>,
-    pub receiver_server: Option<String>,
-    pub sender_offset_ms: Option<f64>,
-    pub receiver_offset_ms: Option<f64>,
-    pub relative_clock_error_bound_ms: Option<f64>,
+    pub sender_server: String,
+    pub receiver_server: String,
+    pub sender_offset_ms: f64,
+    pub receiver_offset_ms: f64,
+    pub relative_clock_error_bound_ms: f64,
+    pub sender_checked_at_unix_ns: i64,
+    pub receiver_checked_at_unix_ns: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,7 +113,7 @@ pub fn analyze_paths(
         status: "error".to_string(),
         sender_file: sender_path.display().to_string(),
         receiver_file: receiver_path.display().to_string(),
-        timing_mode: "sidecar-anchors-v1".to_string(),
+        timing_mode: "sidecar-anchors-v2".to_string(),
         clock_quality: None,
         sender_start_time: None,
         receiver_start_time: None,
@@ -157,18 +159,28 @@ pub fn analyze_paths(
             "发送端和接收端的 NTP server 不一致",
         ));
     }
-    let relative_bound = match (sender_sync.max_abs_offset_ms, receiver_sync.max_abs_offset_ms) {
-        (Some(left), Some(right)) => Some(left.abs() + right.abs()),
-        _ => None,
-    };
+    if timing::utc_day(sender.timing.sidecar.first_pcm_utc_unix_ns)
+        != timing::utc_day(receiver.timing.sidecar.first_pcm_utc_unix_ns)
+    {
+        return set_error(
+            report,
+            AnalysisFailure::new(
+                "UNSUPPORTED_TIMING_PROTOCOL",
+                "发送端和接收端 first_pcm 不在同一 UTC 日（跨午夜不支持）",
+            ),
+        );
+    }
+    let relative_bound = sender_sync.max_abs_offset_ms.abs() + receiver_sync.max_abs_offset_ms.abs();
     report.clock_quality = Some(ClockQuality {
         sender_server: sender_sync.server.clone(),
         receiver_server: receiver_sync.server.clone(),
         sender_offset_ms: sender_sync.max_abs_offset_ms,
         receiver_offset_ms: receiver_sync.max_abs_offset_ms,
         relative_clock_error_bound_ms: relative_bound,
+        sender_checked_at_unix_ns: sender_sync.checked_at_unix_ns,
+        receiver_checked_at_unix_ns: receiver_sync.checked_at_unix_ns,
     });
-    if relative_bound.is_some_and(|value| value > options.max_clock_error_ms) {
+    if relative_bound > options.max_clock_error_ms {
         return set_error(report, AnalysisFailure::new(
             "UNSUPPORTED_TIMING_PROTOCOL",
             format!("两端相对时钟误差上界超过 {:.3}ms", options.max_clock_error_ms),
@@ -232,8 +244,34 @@ fn prepare(path: &Path, timing_path: Option<&Path>, options: &AnalysisOptions) -
     let audio = wav::read_wav(path).map_err(|message| AnalysisFailure::new("WAV_READ_FAILED", message))?;
     let default_timing_path = timing::default_path(path);
     let timing_path = timing_path.unwrap_or(&default_timing_path);
-    let timing = timing::load_and_validate(&timing_path, audio.sample_rate, audio.samples.len())
-        .map_err(|message| AnalysisFailure::new("UNSUPPORTED_TIMING_PROTOCOL", message))?;
+    let timing = timing::load_and_validate(
+        timing_path,
+        path,
+        audio.sample_rate,
+        audio.samples.len(),
+    )
+    .map_err(|message| AnalysisFailure::new("UNSUPPORTED_TIMING_PROTOCOL", message))?;
+
+    let decoded = crate::timestamp::decode(&audio.samples, audio.sample_rate).ok_or_else(|| {
+        AnalysisFailure::new("UNSUPPORTED_TIMING_PROTOCOL", "无法解码 FSK 时间标记")
+    })?;
+    let delta = (decoded.millis_of_day as i64 - timing.sidecar.first_pcm_millis_of_day as i64).abs();
+    if delta > 1 {
+        return Err(AnalysisFailure::new(
+            "UNSUPPORTED_TIMING_PROTOCOL",
+            format!("FSK 与 sidecar first_pcm_millis_of_day 差 {delta}ms，超过 1ms"),
+        ));
+    }
+    if decoded.marker_samples != timing.sidecar.fsk_prefix_samples {
+        return Err(AnalysisFailure::new(
+            "UNSUPPORTED_TIMING_PROTOCOL",
+            format!(
+                "FSK 前缀长度 {} 与 sidecar fsk_prefix_samples {} 不一致",
+                decoded.marker_samples, timing.sidecar.fsk_prefix_samples
+            ),
+        ));
+    }
+
     let marker_end = timing.sidecar.fsk_prefix_samples;
     if marker_end >= audio.samples.len() {
         return Err(AnalysisFailure::new("UNSUPPORTED_TIMING_PROTOCOL", "FSK 前缀后没有真实 PCM"));
