@@ -175,6 +175,8 @@ pub fn analyze_paths(
         Ok(aligned) => aligned,
         Err(message) => {
             report.event_count = sender.events.len();
+            report.events =
+                build_report_events(&sender, &receiver, &sender.events, &receiver.events, None);
             report.error = Some(ReportError {
                 code: "EVENT_DETECTION_UNCERTAIN".to_string(),
                 message,

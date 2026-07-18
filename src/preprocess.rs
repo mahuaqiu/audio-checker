@@ -33,7 +33,7 @@ pub fn resample_to_16k(samples: &[f32], sample_rate: u32) -> Vec<f32> {
 
     const TAPS: isize = 19;
     const CUTOFF: f64 = 1.0 / 3.0;
-    let output_len = (samples.len() + 2) / 3;
+    let output_len = samples.len().div_ceil(3);
     let mut output = Vec::with_capacity(output_len);
     let half = TAPS / 2;
 

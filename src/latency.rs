@@ -36,7 +36,7 @@ pub fn summarize(
 
     let mut sorted = latencies.to_vec();
     sorted.sort_by(|left, right| left.total_cmp(right));
-    let median_ms = if sorted.len() % 2 == 0 {
+    let median_ms = if sorted.len().is_multiple_of(2) {
         (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
     } else {
         sorted[sorted.len() / 2]

@@ -5,6 +5,10 @@ use crate::detector::Event;
 const FRAME: usize = 16;
 const TEMPLATE_MS: usize = 260;
 const SEARCH_MS: usize = 45;
+const MIN_CORRELATION: f64 = 0.45;
+const MIN_PEAK_MARGIN: f64 = 0.02;
+const PEAK_EXCLUSION_MS: usize = SEARCH_MS;
+const CANDIDATE_PRIOR_WEIGHT: f64 = 0.02;
 
 pub fn refine_events(
     sender_samples: &[f32],
@@ -27,7 +31,7 @@ pub fn refine_events(
                 receiver_samples,
                 sender_onset,
                 receiver_onset,
-            );
+            )?;
             Ok((sender_onset, receiver_onset))
         })
         .collect()
@@ -79,28 +83,66 @@ fn correlate_near_candidate(
     receiver_samples: &[f32],
     sender_onset: usize,
     receiver_onset: usize,
-) -> usize {
+) -> Result<usize, String> {
     let template = feature_window(sender_samples, sender_onset, TEMPLATE_MS);
     if template.len() < 8 {
-        return receiver_onset;
+        return Err("发送方拨弦模板过短，无法可靠对齐".to_string());
     }
 
     let radius = SEARCH_MS * 16;
     let start = receiver_onset.saturating_sub(radius);
     let end = (receiver_onset + radius).min(receiver_samples.len().saturating_sub(1));
-    let mut best = receiver_onset;
-    let mut best_score = f64::NEG_INFINITY;
+    let mut scores = Vec::new();
     let mut candidate = start;
     while candidate <= end {
         let candidate_feature = feature_window(receiver_samples, candidate, TEMPLATE_MS);
-        let score = normalized_correlation(&template, &candidate_feature);
-        if score > best_score {
-            best_score = score;
-            best = candidate;
+        if candidate_feature.len() >= 8 {
+            let correlation = normalized_correlation(&template, &candidate_feature);
+            if correlation.is_finite() {
+                let distance = candidate.abs_diff(receiver_onset) as f64 / radius as f64;
+                let score = correlation - CANDIDATE_PRIOR_WEIGHT * distance;
+                scores.push((candidate, score, correlation));
+            }
         }
         candidate += FRAME;
     }
-    best
+    let (best, best_score, best_correlation) = scores
+        .iter()
+        .copied()
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+        .ok_or_else(|| "接收方拨弦候选过短，无法可靠对齐".to_string())?;
+
+    if best_correlation < MIN_CORRELATION {
+        return Err(format!(
+            "拨弦模板相关性过低（{best_correlation:.3}），无法可靠定位接收事件"
+        ));
+    }
+
+    // 只比较局部峰，避免同一相关峰内部的相邻帧被误判为第二个峰。
+    let exclusion = PEAK_EXCLUSION_MS * 16;
+    let competing_score = scores
+        .iter()
+        .enumerate()
+        .filter(|(index, (candidate, _, _))| {
+            candidate.abs_diff(best) > exclusion
+                && scores
+                    .get(index.saturating_sub(1))
+                    .is_none_or(|(_, previous, _)| *previous <= scores[*index].1)
+                && scores
+                    .get(index + 1)
+                    .is_none_or(|(_, next, _)| *next <= scores[*index].1)
+        })
+        .map(|(_, (_, score, _))| *score)
+        .max_by(|left, right| left.total_cmp(right))
+        .unwrap_or(f64::NEG_INFINITY);
+    if competing_score.is_finite() && best_score - competing_score < MIN_PEAK_MARGIN {
+        return Err(format!(
+            "拨弦相关峰不够突出（峰值 {:.3}，次峰 {:.3}），无法可靠定位接收事件",
+            best_score, competing_score
+        ));
+    }
+
+    Ok(best)
 }
 
 fn feature_window(samples: &[f32], onset: usize, duration_ms: usize) -> Vec<f32> {
@@ -154,5 +196,27 @@ mod tests {
                 &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0],
             ) > 0.99
         );
+    }
+
+    #[test]
+    fn 无相关信号时拒绝强行对齐() {
+        let mut sender = vec![0.0f32; 16_000];
+        for (index, sample) in sender.iter_mut().enumerate().skip(1_000).take(4_000) {
+            *sample = (-(index as f32 - 1_000.0) / 700.0).exp();
+        }
+        let receiver = vec![0.0f32; 16_000];
+        let result = refine_events(
+            &sender,
+            &receiver,
+            &[Event {
+                onset_sample: 1_000,
+                end_sample: 5_000,
+            }],
+            &[Event {
+                onset_sample: 1_000,
+                end_sample: 5_000,
+            }],
+        );
+        assert!(result.is_err());
     }
 }

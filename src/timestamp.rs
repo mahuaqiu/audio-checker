@@ -7,6 +7,12 @@ pub const PREAMBLE_BITS: usize = 8;
 pub const DATA_BITS: usize = 27;
 pub const GUARD_DURATION_MS: f64 = 200.0;
 
+const MIN_SYMBOL_SEPARATION: f64 = 0.20;
+const MIN_SYMBOL_PURITY: f64 = 0.20;
+const MIN_AVERAGE_SEPARATION: f64 = 0.55;
+const MIN_AVERAGE_PURITY: f64 = 0.45;
+const MAX_GUARD_TO_SIGNAL_RATIO: f64 = 0.70;
+
 #[derive(Debug, Clone, Copy)]
 pub struct TimestampMark {
     pub millis_of_day: u32,
@@ -100,7 +106,9 @@ fn decode_at_scored(
     }
 
     let mut bits = Vec::with_capacity(total_bits);
-    let mut score = 0.0;
+    let mut separations = Vec::with_capacity(total_bits);
+    let mut purities = Vec::with_capacity(total_bits);
+    let mut signal_rms = Vec::with_capacity(total_bits);
     for bit_index in 0..total_bits {
         let start = offset + bit_index * symbol_samples;
         let window = &samples[start..start + symbol_samples];
@@ -110,17 +118,19 @@ fn decode_at_scored(
             return None;
         }
         let bit = if energy_1 > energy_0 { 1u32 } else { 0u32 };
-        let expected = if bit_index < PREAMBLE_BITS {
-            if bit_index % 2 == 0 {
-                1
-            } else {
-                0
-            }
-        } else {
-            bit
-        };
-        let magnitude = (energy_1 - energy_0).abs() / (energy_1 + energy_0).max(1e-20);
-        score += if expected == 1 { magnitude } else { -magnitude };
+        let separation = (energy_1 - energy_0).abs() / (energy_1 + energy_0).max(1e-20);
+        let total_energy = window
+            .iter()
+            .map(|value| (*value as f64) * (*value as f64))
+            .sum::<f64>();
+        let purity =
+            2.0 * energy_0.max(energy_1) / (symbol_samples as f64 * total_energy).max(1e-20);
+        if separation < MIN_SYMBOL_SEPARATION || purity < MIN_SYMBOL_PURITY {
+            return None;
+        }
+        separations.push(separation);
+        purities.push(purity.min(1.0));
+        signal_rms.push((total_energy / symbol_samples as f64).sqrt());
         bits.push(bit);
     }
 
@@ -128,6 +138,29 @@ fn decode_at_scored(
         .filter(|&i| bits[i] != if i % 2 == 0 { 1 } else { 0 })
         .count();
     if hamming > 1 {
+        return None;
+    }
+
+    let average_separation = separations.iter().sum::<f64>() / separations.len() as f64;
+    let average_purity = purities.iter().sum::<f64>() / purities.len() as f64;
+    if average_separation < MIN_AVERAGE_SEPARATION || average_purity < MIN_AVERAGE_PURITY {
+        return None;
+    }
+
+    let guard_start = offset + total_bits * symbol_samples;
+    let guard = &samples[guard_start..offset + marker_length];
+    let guard_rms = if guard.is_empty() {
+        0.0
+    } else {
+        (guard
+            .iter()
+            .map(|value| (*value as f64) * (*value as f64))
+            .sum::<f64>()
+            / guard.len() as f64)
+            .sqrt()
+    };
+    let average_signal_rms = signal_rms.iter().sum::<f64>() / signal_rms.len() as f64;
+    if guard_rms > average_signal_rms * MAX_GUARD_TO_SIGNAL_RATIO {
         return None;
     }
 
@@ -143,7 +176,7 @@ fn decode_at_scored(
             millis_of_day: millis,
             marker_samples: marker_length,
         },
-        score,
+        average_separation,
     ))
 }
 
@@ -213,5 +246,17 @@ mod tests {
         let (decoded, offset) = decode_with_offset(&samples, 16_000).unwrap();
         assert_eq!(decoded.millis_of_day, 1000);
         assert_eq!(offset, 1600);
+    }
+
+    #[test]
+    fn 非目标连续音不能伪装成时间标记() {
+        let sample_rate = 16_000;
+        let length = marker_samples(sample_rate);
+        let samples = (0..length)
+            .map(|index| {
+                (0.001 * (2.0 * PI * 7_200.0 * index as f64 / sample_rate as f64).sin()) as f32
+            })
+            .collect::<Vec<_>>();
+        assert!(decode(&samples, sample_rate).is_none());
     }
 }

@@ -59,7 +59,7 @@ pub fn read_wav(path: &Path) -> Result<AudioFile, String> {
     };
 
     let channels = spec.channels as usize;
-    if interleaved.len() % channels != 0 {
+    if !interleaved.len().is_multiple_of(channels) {
         return Err("WAV 音频数据不是完整的多声道帧".to_string());
     }
     let samples = interleaved
